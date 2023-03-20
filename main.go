@@ -28,10 +28,13 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/edubois10/hello-controller/controllers"
+	controllers "github.com/edubois10/hello-controller/controllers"
+	machinev1 "github.com/openshift/api/machine/v1beta1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -43,6 +46,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
+	utilruntime.Must(machinev1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -69,7 +73,8 @@ func main() {
 		Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "f283254e.hello-controller.com",
+		LeaderElectionID:       "7227ad9a.bit.admin.ch",
+		Namespace:              "openshift-machine-api",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -86,12 +91,42 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
-
-	if err = (&controllers.ControllerReconciler{
+	// Initializing the reconciler
+	reconciler := &controllers.DRSVmGroupReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Controller")
+	}
+
+	// Creating a temporary Client to fetch the VSphere credentials located in a secret in
+	// the openshift-machine-api namespace. This cannot be done with the reconcile controller
+	// because the client haven't been intialized yet.
+	// https://github.com/operator-framework/operator-sdk/issues/4550
+	kubeconfig, err := config.GetConfig()
+	if err != nil {
+		setupLog.Error(err, "Unable to get the config")
+		os.Exit(1)
+	}
+
+	secretClient, err := client.New(kubeconfig, client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		setupLog.Error(err, "Unable to create secretClient")
+		os.Exit(1)
+	}
+	vsphereConfig, err := controllers.GetVSphereConfFromSecrets(secretClient)
+	if err != nil {
+		setupLog.Error(err, "Unable to get vsphereConfiguration")
+		os.Exit(1)
+	}
+
+	reconciler.Server = vsphereConfig.VSphereServer
+	reconciler.Username = vsphereConfig.VSphereUser
+	reconciler.Password = vsphereConfig.VSpherePassword
+
+	setupLog.Info("The VSphere Server is ", "Server", reconciler.Server)
+	setupLog.Info("The VSphere Username is ", "Server", reconciler.Username)
+
+	if err = reconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DRSVmGroup")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder
@@ -110,4 +145,5 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+
 }
